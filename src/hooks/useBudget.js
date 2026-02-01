@@ -1,58 +1,86 @@
 import { useState, useEffect } from 'react';
-import { doc, collection, onSnapshot, query, orderBy } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, collection, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 
 export function useBudget(month, year) {
     const { currentUser } = useAuth();
-    const [budgetData, setBudgetData] = useState({ income: 0, budgetRule: '50/30/20' });
+    const [budgetData, setBudgetData] = useState({ 
+        income: 0, 
+        rule: '50/30/20', // Default rule
+        limit: 0 
+    });
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
 
-    // This matches your original appId variable
-    const appId = 'default-503020-app'; 
+    // Dynamic Path based on selection
     const monthYear = `${year}-${month}`;
+    const appId = 'default-503020-app';
 
     useEffect(() => {
-        if (!currentUser) {
-            setItems([]);
-            return;
-        }
+        if (!currentUser) return;
 
-        setLoading(true);
+        const userPath = `artifacts/${appId}/users/${currentUser.uid}`;
+        const budgetDocPath = `${userPath}/budget/${monthYear}`;
+        const itemsPath = `${budgetDocPath}/items`;
 
-        // Path: artifacts/{appId}/users/{uid}/budget/{YYYY-MM}
-        const userBudgetPath = `artifacts/${appId}/users/${currentUser.uid}/budget/${monthYear}`;
-        const budgetDocRef = doc(db, userBudgetPath);
-        const itemsColRef = collection(db, userBudgetPath, 'items');
-
-        // Listener 1: Income & Rule
-        const unsubBudget = onSnapshot(budgetDocRef, (docSnap) => {
+        // 1. Listen to Budget Document (Income, Rule, etc.)
+        const unsubBudget = onSnapshot(doc(db, budgetDocPath), (docSnap) => {
             if (docSnap.exists()) {
-                setBudgetData(docSnap.data());
+                setBudgetData({ ...docSnap.data() });
             } else {
-                // Default values if month doesn't exist yet
-                setBudgetData({ income: 0, budgetRule: '50/30/20' });
+                // If doc doesn't exist, we just show defaults (0 income), we don't crash.
+                setBudgetData({ income: 0, rule: '50/30/20', limit: 0 });
             }
         });
 
-        // Listener 2: Budget Items (Expenses/Needs/Wants)
-        const unsubItems = onSnapshot(itemsColRef, (snapshot) => {
-            const loadedItems = snapshot.docs.map(doc => ({
+        // 2. Listen to Budget Items (Expenses)
+        const q = query(collection(db, itemsPath), orderBy('createdAt', 'desc'));
+        const unsubItems = onSnapshot(q, (snapshot) => {
+            const fetchedItems = snapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data()
             }));
-            setItems(loadedItems);
+            setItems(fetchedItems);
             setLoading(false);
         });
 
-        // Cleanup function (runs when month changes or component unmounts)
         return () => {
             unsubBudget();
             unsubItems();
         };
+    }, [currentUser, month, year]);
 
-    }, [currentUser, month, year]); // Re-run if any of these change
+    // --- THE FIX IS IN THESE FUNCTIONS BELOW ---
+    
+    // Function to safely update Income
+    const updateIncome = async (newIncome) => {
+        if (!currentUser) return;
+        const budgetRef = doc(db, `artifacts/${appId}/users/${currentUser.uid}/budget/${monthYear}`);
+        
+        // Use setDoc with merge:true instead of updateDoc
+        await setDoc(budgetRef, { 
+            income: parseFloat(newIncome) 
+        }, { merge: true });
+    };
 
-    return { budgetData, items, loading };
+    // Function to safely update Budget Rule
+    const updateRule = async (newRule) => {
+        if (!currentUser) return;
+        const budgetRef = doc(db, `artifacts/${appId}/users/${currentUser.uid}/budget/${monthYear}`);
+        
+        // Use setDoc with merge:true
+        // This ensures the document is CREATED if it's the first time you touch it for the month
+        await setDoc(budgetRef, { 
+            rule: newRule 
+        }, { merge: true });
+    };
+
+    return { 
+        budgetData, 
+        items, 
+        loading, 
+        updateIncome, 
+        updateRule // Make sure to export this so components can use it
+    };
 }
